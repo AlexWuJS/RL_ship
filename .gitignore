@@ -11,3 +11,4 @@ build/
 C_library/build/
 C_library/*.so
 C_library/*.pyd
+*.png

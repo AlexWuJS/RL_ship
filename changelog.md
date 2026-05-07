@@ -20,3 +20,13 @@
 | 文件 | 修改摘要 |
 |------|---------|
 | （首次提交） | 基于 [USVPlanner](https://github.com/yaozt98/USVPlanner.git) 项目初始化项目结构，添加航道地图与轨迹数据，实现静态地图管理模块。 |
+
+---
+
+## 第 2 次变动
+
+### 文件内容
+
+| 文件/文件夹 | 内容说明 |
+|------------|---------|
+| `trajectory_ship.py` | 轨迹驱动的动态障碍物船只模块。加载 `ais_scenario.json` 中 38 条 AIS 轨迹，使用三次样条插值 (`scipy.interpolate.CubicSpline`) 实现平滑运动，自动管理最多 5 艘活跃船只的激活与回收，接口兼容 `Ship` 类，可直接替换 CrowdSim 中的随机 ORCA 船只。 |
