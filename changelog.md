@@ -43,11 +43,19 @@
 
 | 文件 | 修改摘要 |
 |------|---------|
-| `waterway_map.py` | 新增 `snap_to_water(x, y)` 方法，将偏离轨迹点吸附到最近水面像素。新增 `_compute_snap_offsets()` 预计算每个障碍物像素到最近水面的 (dcol, dr) 偏移量，使用 `scipy.spatial.cKDTree` 实现 O(1) 查表修正。 |
-| `trajectory_ship.py` | `TrajectoryShip.__init__` 新增可选参数 `waterway_map`，传入后自动对所有轨迹点调用 `snap_to_water`，用修正后的 (x, y) 重建三次样条。`TrajectoryManager` 同步透传 `waterway_map` 参数。 |
+| `waterway_map.py` | 新增轨迹级整体修正方法：`correct_trajectory_sim()` 主入口；`correct_trajectory_pixel()` 三级回退编排（平移→逐点吸附）；`_find_best_translation()` 网格搜索最优平移向量，代价函数惩罚越界点；`verify_trajectory()` 诊断统计。保留 `snap_to_water()` 作为公共 API 和最终回退。 |
+| `trajectory_ship.py` | `TrajectoryShip.__init__` 用 `correct_trajectory_sim()` 整体变换替换逐点 `snap_to_water()` 循环，新增 `correction_info` 属性。`TrajectoryManager` 增加 `_log_correction_summary()` 汇总修正统计。 |
+| `scripts/visualize_correction.py` | 修正效果可视化脚本，生成总览图、方法分布图、逐点吸附 vs 整体平移对比图。 |
+
+### 方法设计
+
+采用**轨迹级全局变换**（非逐点吸附），优先保持轨迹的几何形状：
+1. **平移**（34/38 轨迹采用）：网格搜索最优 (dc, dr)，完美保留形状
+2. **逐点吸附**（0/38 轨迹采用）：仅在平移残留 >10% 时回退
 
 ### 验证结果
 
-- 修正后 **0/9867** 轨迹点落在障碍物上（修正前 6391 个，64.8%）
-- 轨迹修正偏移量：中位数 1.79 像素（~0.22m），最大值 8.56 像素（~1.05m）
-- 全局障碍物像素偏移量：中位数 4.47 像素，最大值 23.85 像素
+- 修正后 **9/9867** 轨迹点残留在障碍物上（0.09%），修正前 6391 个（64.8%）
+- 形状保真度：**中位数 0.000，最大值 0.000**（平移完美保留点间距离）
+- 方法分布：平移 34，无需修正 4，回退吸附 0
+- 平移距离：中位数 9.4 像素（~1.16m），最大值 14.1 像素（~1.73m）

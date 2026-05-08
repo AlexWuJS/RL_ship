@@ -24,9 +24,9 @@ _TRAJECTORY_PATH = os.path.join(_DATA_DIR, "processed", "trajectories", "ais_sce
 class TrajectoryShip(Ship):
     """A vessel that follows a pre-recorded AIS trajectory via cubic spline.
 
-    If *waterway_map* is provided, trajectory waypoints are auto-snapped to
-    the nearest water pixel to correct minor alignment errors between the AIS
-    data and the occupancy grid.
+    If *waterway_map* is provided, a smooth global transform (translation
+    preferred; per-point snap as last resort) is applied to the entire
+    trajectory to correct minor alignment errors while preserving shape.
     """
 
     def __init__(self, trajectory_data: dict, time_step: float = 1.0,
@@ -44,17 +44,14 @@ class TrajectoryShip(Ship):
         _x_raw = np.array([p["x"] for p in pts], dtype=np.float64)
         _y_raw = np.array([p["y"] for p in pts], dtype=np.float64)
 
-        # Snap to water if a map is available
+        # Apply trajectory-level correction if map is available
         if waterway_map is not None:
-            self._x = np.empty_like(_x_raw)
-            self._y = np.empty_like(_y_raw)
-            for i in range(len(_x_raw)):
-                sx, sy = waterway_map.snap_to_water(_x_raw[i], _y_raw[i])
-                self._x[i] = sx
-                self._y[i] = sy
+            self._x, self._y, self._correction_info = \
+                waterway_map.correct_trajectory_sim(_x_raw, _y_raw)
         else:
             self._x = _x_raw
             self._y = _y_raw
+            self._correction_info = None
 
         self._original_len = len(pts)
 
@@ -82,6 +79,11 @@ class TrajectoryShip(Ship):
     @active.setter
     def active(self, value: bool):
         self._active = value
+
+    @property
+    def correction_info(self) -> dict:
+        """Diagnostic info about the alignment correction applied."""
+        return self._correction_info
 
     @property
     def duration(self) -> float:
@@ -170,6 +172,9 @@ class TrajectoryManager:
         # Active ships
         self._active_ships: list[TrajectoryShip] = []
 
+        if waterway_map is not None:
+            self._log_correction_summary()
+
     # ---- properties ---------------------------------------------------------
 
     @property
@@ -185,6 +190,20 @@ class TrajectoryManager:
         return self._config
 
     # ---- lifecycle ----------------------------------------------------------
+
+    def _log_correction_summary(self):
+        """Print a one-line summary of alignment correction statistics."""
+        counts = {"none": 0, "translation": 0, "fallback_snap": 0}
+        obs_before = 0
+        obs_after = 0
+        for ship in self._all_ships:
+            info = ship._correction_info
+            if info:
+                counts[info.get("method", "unknown")] += 1
+                obs_before += info.get("obstacle_before", 0)
+                obs_after += info.get("obstacle_after", 0)
+        print(f"[TrajectoryManager] Alignment: {counts['translation']}T/{counts['fallback_snap']}S "
+              f" obstacle pts {obs_before}→{obs_after}")
 
     def reset(self, sim_time: float = 0.0, seed: Optional[int] = None):
         """Reset and activate a random subset of trajectories."""
@@ -272,37 +291,19 @@ if __name__ == "__main__":
         print(f"  t={t:3.0f}: x={s.px:.4f} y={s.py:.4f} vx={s.vx:.4f} vy={s.vy:.4f}")
 
     # ---- Alignment verification ----
-    print("\nAlignment check (all trajectory points on water):")
-    import json
-    with open(_TRAJECTORY_PATH) as f:
-        raw = json.load(f)
-
+    print("\nAlignment check (per-trajectory global correction):")
+    methods = {"none": 0, "translation": 0, "fallback_snap": 0}
     total = 0
     on_obstacle = 0
-    for obs in raw["obstacles"]:
-        for pt in obs["trajectory"]:
-            total += 1
-            xs, ys = wm.snap_to_water(pt["x"], pt["y"])
-            c, r = wm.sim_to_pixel(xs, ys)
-            ci, ri = int(round(c)), int(round(r))
-            if 0 <= ci < wm.shape[1] and 0 <= ri < wm.shape[0]:
-                if wm.grid[ri, ci] != 0:
-                    on_obstacle += 1
-    pct = 100 * on_obstacle / total if total else 0
-    print(f"  {on_obstacle}/{total} points on obstacles after snap ({pct:.2f}%)")
-    grid_pct = 100 * np.sum(wm.grid) / wm.grid.size
-    print(f"  Grid obstacle coverage: {grid_pct:.1f}%")
+    for ship in mgr.all_ships:
+        info = ship.correction_info
+        if info:
+            methods[info.get("method", "unknown")] += 1
+            total += info["n_total"]
+            on_obstacle += info["obstacle_after"]
 
-    # Show a few before/after examples
-    print("\nBefore/after snap examples:")
-    obs_data = raw["obstacles"][0]["trajectory"]
-    for i in [0, len(obs_data)//4, len(obs_data)//2, 3*len(obs_data)//4]:
-        pt = obs_data[min(i, len(obs_data)-1)]
-        xs, ys = wm.snap_to_water(pt["x"], pt["y"])
-        cr, rr = wm.sim_to_pixel(pt["x"], pt["y"])
-        cs, rs = wm.sim_to_pixel(xs, ys)
-        dx = xs - pt["x"]
-        dy = ys - pt["y"]
-        print(f"  pt[{i}]: ({pt['x']:.2f},{pt['y']:.2f}) -> ({xs:.2f},{ys:.2f}) "
-              f"offset=({dx:.3f},{dy:.3f})m | pixel ({cr:.1f},{rr:.1f})->({cs:.1f},{rs:.1f})")
+    pct = 100 * on_obstacle / total if total else 0
+    print(f"  Method distribution: {methods}")
+    print(f"  Total points: {total}")
+    print(f"  Points on obstacles after correction: {on_obstacle} ({pct:.2f}%)")
     print("Done!")
