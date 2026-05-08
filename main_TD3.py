@@ -47,6 +47,9 @@ def eval_policy(policy, eval_env, time_step=0, save_directory=None,eval_config:d
         elif isinstance(info, Outside):
             collision += 1
             print('Episode: ' + str(idx) + ', Obstacles: ' + str(eval_env.ship_num) + ', Outside: ' + str(ep_step))
+        elif isinstance(info, Grounding):
+            collision += 1
+            print('Episode: ' + str(idx) + ', Obstacles: ' + str(eval_env.ship_num) + ', Grounding: ' + str(ep_step))
         else:
             raise ValueError('Invalid end signal from environment')
 
@@ -69,6 +72,16 @@ def default_dump(obj):
         return obj
 
 def create_eval_configs(eval_env):
+    # waterway mode: use different trajectory seeds
+    if hasattr(eval_env, '_trajectory_manager'):
+        eval_config = {}
+        for i in range(80):
+            eval_env._current_seed = i + 1000
+            eval_env.reset()
+            eval_config[f"env_{i}"] = eval_env.episode_data()
+        return eval_config
+
+    # original ORCA mode
     eval_config = {}
     num_episodes = [20,20,20,20]
     num_os = [5, 6, 7, 8]
@@ -138,13 +151,22 @@ if __name__ == "__main__":
     parser.add_argument("--square_width", type=float, default=1000.0)
     parser.add_argument("--discomfort_distance", type=float, default=30)
     parser.add_argument("--classical", default=False)
+    parser.add_argument("--waterway_mode", action="store_true", default=False,
+                        help="Use WaterwayMap + AIS trajectory environment")
+    parser.add_argument("--waterway_max_ships", type=int, default=5,
+                        help="Max active AIS ships in waterway mode")
+    parser.add_argument("--grounding_margin", type=float, default=5.0,
+                        help="Safety buffer (sim-units) beyond USV radius for grounding")
     args = parser.parse_args()
 
     print("---------------------------------------")
     print(f"Policy: {args.policy}, Env: {args.env}, Seed: {args.seed}")
     print("---------------------------------------")
 
-    from marine_simulation import CrowdSim
+    if hasattr(args, 'waterway_mode') and args.waterway_mode:
+        from marine_simulation_waterway import WaterwayCrowdSim as CrowdSim
+    else:
+        from marine_simulation import CrowdSim
 
     file_prefix = './logdir/' + args.policy + str(args.discomfort_distance) + '/' + args.env + '/seed_' + str(args.seed)   # choose your own log directory
 
@@ -267,6 +289,8 @@ if __name__ == "__main__":
                 print('Steps ' + str(t) + ', Episodes ' + str(episode_num+1) + ', Obstacles ' + str(env.ship_num) + ', Time-out ' + str(episode_timesteps) + ', Return ' + '%.2f' % episode_reward)
             elif isinstance(info, Outside):
                 print('Steps ' + str(t) + ', Episodes ' + str(episode_num+1) + ', Obstacles ' + str(env.ship_num) + ', Outside ' + str(episode_timesteps) + ', Return ' + '%.2f' % episode_reward)
+            elif isinstance(info, Grounding):
+                print('Steps ' + str(t) + ', Episodes ' + str(episode_num+1) + ', Obstacles ' + str(env.ship_num) + ', Grounding ' + str(episode_timesteps) + ', Return ' + '%.2f' % episode_reward)
             else:
                 raise ValueError('Invalid end signal from environment')
             # Reset environment

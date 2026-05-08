@@ -40,6 +40,15 @@ class Outside(object):
         return 'Outside'
 
 
+class Grounding(object):
+    """USV ran aground (hit waterway bank)."""
+    def __init__(self):
+        pass
+
+    def __str__(self):
+        return 'Grounding'
+
+
 class Nothing(object):
     def __init__(self):
         pass
