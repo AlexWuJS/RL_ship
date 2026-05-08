@@ -22,9 +22,15 @@ _TRAJECTORY_PATH = os.path.join(_DATA_DIR, "processed", "trajectories", "ais_sce
 
 
 class TrajectoryShip(Ship):
-    """A vessel that follows a pre-recorded AIS trajectory via cubic spline."""
+    """A vessel that follows a pre-recorded AIS trajectory via cubic spline.
 
-    def __init__(self, trajectory_data: dict, time_step: float = 1.0):
+    If *waterway_map* is provided, trajectory waypoints are auto-snapped to
+    the nearest water pixel to correct minor alignment errors between the AIS
+    data and the occupancy grid.
+    """
+
+    def __init__(self, trajectory_data: dict, time_step: float = 1.0,
+                 waterway_map=None):
         super().__init__(time_step=time_step)
 
         self.ship_id = trajectory_data["id"]
@@ -35,8 +41,21 @@ class TrajectoryShip(Ship):
         # Extract waypoints
         pts = trajectory_data["trajectory"]
         self._t = np.array([p["t"] for p in pts], dtype=np.float64)
-        self._x = np.array([p["x"] for p in pts], dtype=np.float64)
-        self._y = np.array([p["y"] for p in pts], dtype=np.float64)
+        _x_raw = np.array([p["x"] for p in pts], dtype=np.float64)
+        _y_raw = np.array([p["y"] for p in pts], dtype=np.float64)
+
+        # Snap to water if a map is available
+        if waterway_map is not None:
+            self._x = np.empty_like(_x_raw)
+            self._y = np.empty_like(_y_raw)
+            for i in range(len(_x_raw)):
+                sx, sy = waterway_map.snap_to_water(_x_raw[i], _y_raw[i])
+                self._x[i] = sx
+                self._y[i] = sy
+        else:
+            self._x = _x_raw
+            self._y = _y_raw
+
         self._original_len = len(pts)
 
         # ---- cubic spline interpolation ----
@@ -131,9 +150,11 @@ class TrajectoryShip(Ship):
 class TrajectoryManager:
     """Manages a pool of TrajectoryShip instances and handles activation."""
 
-    def __init__(self, max_active: int = 5, time_step: float = 1.0):
+    def __init__(self, max_active: int = 5, time_step: float = 1.0,
+                 waterway_map=None):
         self.max_active = max_active
         self.time_step = time_step
+        self._waterway_map = waterway_map
 
         # Load all trajectories from JSON
         with open(_TRAJECTORY_PATH, "r") as f:
@@ -141,7 +162,8 @@ class TrajectoryManager:
 
         self._config = raw
         self._all_ships: list[TrajectoryShip] = [
-            TrajectoryShip(obs, time_step=time_step)
+            TrajectoryShip(obs, time_step=time_step,
+                           waterway_map=waterway_map)
             for obs in raw["obstacles"]
         ]
 
@@ -223,7 +245,10 @@ class TrajectoryManager:
 
 # ---- quick self-test --------------------------------------------------------
 if __name__ == "__main__":
-    mgr = TrajectoryManager(max_active=5)
+    from waterway_map import WaterwayMap
+
+    wm = WaterwayMap()
+    mgr = TrajectoryManager(max_active=5, waterway_map=wm)
     mgr.reset(sim_time=0.0)
 
     print(f"TrajectoryManager loaded {len(mgr.all_ships)} ship trajectories.")
@@ -245,3 +270,39 @@ if __name__ == "__main__":
     for t in [0, 60, 120, 180]:
         s.sync(t)
         print(f"  t={t:3.0f}: x={s.px:.4f} y={s.py:.4f} vx={s.vx:.4f} vy={s.vy:.4f}")
+
+    # ---- Alignment verification ----
+    print("\nAlignment check (all trajectory points on water):")
+    import json
+    with open(_TRAJECTORY_PATH) as f:
+        raw = json.load(f)
+
+    total = 0
+    on_obstacle = 0
+    for obs in raw["obstacles"]:
+        for pt in obs["trajectory"]:
+            total += 1
+            xs, ys = wm.snap_to_water(pt["x"], pt["y"])
+            c, r = wm.sim_to_pixel(xs, ys)
+            ci, ri = int(round(c)), int(round(r))
+            if 0 <= ci < wm.shape[1] and 0 <= ri < wm.shape[0]:
+                if wm.grid[ri, ci] != 0:
+                    on_obstacle += 1
+    pct = 100 * on_obstacle / total if total else 0
+    print(f"  {on_obstacle}/{total} points on obstacles after snap ({pct:.2f}%)")
+    grid_pct = 100 * np.sum(wm.grid) / wm.grid.size
+    print(f"  Grid obstacle coverage: {grid_pct:.1f}%")
+
+    # Show a few before/after examples
+    print("\nBefore/after snap examples:")
+    obs_data = raw["obstacles"][0]["trajectory"]
+    for i in [0, len(obs_data)//4, len(obs_data)//2, 3*len(obs_data)//4]:
+        pt = obs_data[min(i, len(obs_data)-1)]
+        xs, ys = wm.snap_to_water(pt["x"], pt["y"])
+        cr, rr = wm.sim_to_pixel(pt["x"], pt["y"])
+        cs, rs = wm.sim_to_pixel(xs, ys)
+        dx = xs - pt["x"]
+        dy = ys - pt["y"]
+        print(f"  pt[{i}]: ({pt['x']:.2f},{pt['y']:.2f}) -> ({xs:.2f},{ys:.2f}) "
+              f"offset=({dx:.3f},{dy:.3f})m | pixel ({cr:.1f},{rr:.1f})->({cs:.1f},{rs:.1f})")
+    print("Done!")

@@ -47,6 +47,9 @@ class WaterwayMap:
         # Precompute distance transform for reward shaping
         self._distance_transform: np.ndarray = self._compute_distance_transform()
 
+        # Precompute snap offsets: for each pixel, the vector to the nearest water pixel
+        self._snap_offset: np.ndarray = self._compute_snap_offsets()
+
     # ---- public helpers ---------------------------------------------------
 
     @property
@@ -100,6 +103,20 @@ class WaterwayMap:
         col, row = self.sim_to_pixel(x, y)
         return not (0 <= col < self._W and 0 <= row < self._H)
 
+    def snap_to_water(self, x: float, y: float) -> tuple[float, float]:
+        """Snap an (x, y) position to the nearest water (free) pixel.
+
+        Returns unchanged (x, y) if already on water or outside map.
+        """
+        col, row = self.sim_to_pixel(x, y)
+        c, r = int(round(col)), int(round(row))
+        if not (0 <= c < self._W and 0 <= r < self._H):
+            return x, y
+        if self._grid[r, c] == 0:          # already on water
+            return x, y
+        dc, dr = self._snap_offset[r, c, 0], self._snap_offset[r, c, 1]
+        return self.pixel_to_sim(c + dc, r + dr)
+
     # ---- private ----------------------------------------------------------
 
     def _parse_yaml(self, raw: str):
@@ -145,6 +162,30 @@ class WaterwayMap:
         free = (1 - self._grid).astype(np.uint8)
         return cv2.distanceTransform(free, cv2.DIST_L2, 5)
 
+    def _compute_snap_offsets(self) -> np.ndarray:
+        """Precompute (dcol, dr) offset vectors to nearest water for each pixel.
+
+        Shape (H, W, 2).  Zero vector for pixels that are already water.
+        """
+        from scipy.spatial import cKDTree
+
+        offsets = np.zeros((self._H, self._W, 2), dtype=np.float32)
+
+        water_rc = np.argwhere(self._grid == 0)                 # (N, 2) [row, col]
+        tree = cKDTree(water_rc)
+
+        obs_rc = np.argwhere(self._grid == 1)                   # (M, 2) [row, col]
+        if len(obs_rc) == 0:
+            return offsets
+
+        _, idx = tree.query(obs_rc)
+        nearest = water_rc[idx]                                  # (M, 2) [row, col]
+
+        offsets[obs_rc[:, 0], obs_rc[:, 1], 0] = nearest[:, 1] - obs_rc[:, 1]  # dcol
+        offsets[obs_rc[:, 0], obs_rc[:, 1], 1] = nearest[:, 0] - obs_rc[:, 0]  # drow
+
+        return offsets
+
 
 # ---- quick self-test ------------------------------------------------------
 if __name__ == "__main__":
@@ -152,8 +193,23 @@ if __name__ == "__main__":
     print(f"Map grid shape ....... {wm.shape}")
     print(f"Contour line segments   {len(wm.contour_lines)}")
     print(f"Distance transform ..   {wm.distance_transform.shape}")
+    print(f"Snap offset array ...   {wm._snap_offset.shape}")
     c, r = 71.4, 4.5
     x, y = wm.pixel_to_sim(c, r)
     print(f"pixel ({c:.1f}, {r:.1f}) -> sim ({x:.2f}, {y:.2f})")
     print(f"dist at sim (0, 0) ..   {wm.dist_to_nearest_obstacle(0, 0):.2f} px")
-    print(f"dist at sim (-22.4, -50.9) .. {wm.dist_to_nearest_obstacle(-22.4, -50.9):.2f} px")
+
+    # Snap test
+    import json, os
+    with open(os.path.join(_DATA_DIR, "processed", "trajectories", "ais_scenario.json")) as f:
+        data = json.load(f)
+    obs = data["obstacles"][0]
+    pt = obs["trajectory"][0]
+    x_raw, y_raw = pt["x"], pt["y"]
+    x_snap, y_snap = wm.snap_to_water(x_raw, y_raw)
+    col_r, row_r = wm.sim_to_pixel(x_raw, y_raw)
+    col_s, row_s = wm.sim_to_pixel(x_snap, y_snap)
+    print(f"\nSnap test: ship {obs['id']}")
+    print(f"  raw  ({x_raw:.2f}, {y_raw:.2f}) -> pixel ({col_r:.1f}, {row_r:.1f}) grid={wm.grid[int(row_r), int(col_r)]}")
+    print(f"  snap ({x_snap:.2f}, {y_snap:.2f}) -> pixel ({col_s:.1f}, {row_s:.1f}) grid={wm.grid[int(row_s), int(col_s)]}")
+    print(f"  offset: ({x_snap-x_raw:.3f}, {y_snap-y_raw:.3f}) m")
